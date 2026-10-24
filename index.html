@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Matchday</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&display=swap" rel="stylesheet">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:#0a130d;--panel:#13211a;--line:#223a2c;--text:#eef5f0;--dim:#8fa597;--accent:#b6f23a;--live:#ff4d4d;color-scheme:dark}
+*{box-sizing:border-box;margin:0}
+html,body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+body{padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0)}
+header{padding:14px 12px 4px;display:flex;align-items:baseline;justify-content:space-between}
+h1{font-family:"Barlow Condensed",Impact,sans-serif;font-weight:700;font-size:30px;letter-spacing:1px;text-transform:uppercase}
+h1 span{color:var(--accent)}
+#upd{font-size:11px;color:var(--dim)}
+.strip,.chips{display:flex;gap:6px;overflow-x:auto;padding:8px 12px;scrollbar-width:none}
+.strip::-webkit-scrollbar,.chips::-webkit-scrollbar{display:none}
+.day,.chip{flex:none;border:1px solid var(--line);background:none;color:var(--dim);border-radius:10px;padding:8px 14px;font:inherit;font-size:13px;cursor:pointer}
+.chip{border-radius:99px;padding:7px 13px}
+.day.on,.chip.on{background:var(--accent);border-color:var(--accent);color:#10200a;font-weight:700}
+.chip.live.on{background:var(--live);border-color:var(--live);color:#fff}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.lg{font-family:"Barlow Condensed",Impact,sans-serif;font-weight:600;font-size:15px;letter-spacing:.8px;text-transform:uppercase;color:var(--accent);padding:16px 14px 6px}
+.m{margin:0 12px 8px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;cursor:pointer}
+.top{display:flex;align-items:center;gap:10px}
+.st{width:46px;flex:none;font-size:12px;font-weight:700;color:var(--dim);text-align:center}
+.st.in{color:var(--live)}
+.teams{flex:1;min-width:0}
+.t{display:flex;align-items:center;gap:8px;padding:3px 0}
+.t img{width:22px;height:22px;object-fit:contain;flex:none}
+.t .n{flex:1;min-width:0;font-size:15px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.t .sc{font-family:"Barlow Condensed",Impact,sans-serif;font-size:24px;font-weight:700;width:28px;text-align:right}
+.star{background:none;border:0;color:var(--dim);font-size:17px;cursor:pointer;padding:2px 4px}
+.star.on{color:var(--accent)}
+.det{margin:8px 0 2px 56px;font-size:13px;color:#c9d8ce;line-height:1.6;border-top:1px solid var(--line);padding-top:8px}
+.det small{color:var(--dim)}
+.empty{padding:50px 20px;text-align:center;color:var(--dim)}
+.note{padding:10px 14px 40px;font-size:11px;color:var(--dim);text-align:center}
+</style>
+</head>
+<body>
+<header><h1>Match<span>day</span> ⚽</h1><div id="upd"></div></header>
+<div class="strip" id="strip"></div>
+<div class="chips" id="chips"></div>
+<main id="main"><div class="empty">Loading matches…</div></main>
+<div class="note">Scores from ESPN's public data. Times shown in your local time. Updates every 45 seconds while matches are live.</div>
+
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+try { tg && (tg.ready(), tg.expand()); } catch (e) {}
+const store = {
+  get(k) { return new Promise(res => {
+    try { if (tg && tg.CloudStorage && tg.isVersionAtLeast("6.9")) return tg.CloudStorage.getItem(k, (e, v) => res(e ? null : v)); } catch (e) {}
+    try { res(localStorage.getItem(k)); } catch (e) { res(null); } }); },
+  set(k, v) {
+    try { if (tg && tg.CloudStorage && tg.isVersionAtLeast("6.9")) return tg.CloudStorage.setItem(k, v); } catch (e) {}
+    try { localStorage.setItem(k, v); } catch (e) {}
+  }
+};
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+const LEAGUES = [["uefa.champions","Champions League"],["uefa.europa","Europa League"],["uefa.europa.conf","Conference League"],["fifa.world","World Cup"],["eng.1","Premier League"],["esp.1","La Liga"],["ita.1","Serie A"],["ger.1","Bundesliga"],["fra.1","Ligue 1"],["ned.1","Eredivisie"],["por.1","Primeira Liga"],["tur.1","Süper Lig"],["sco.1","Scottish Premiership"],["eng.2","Championship"],["eng.fa","FA Cup"],["usa.1","MLS"],["mex.1","Liga MX"],["bra.1","Brasileirão"],["arg.1","Argentine Liga"]];
+let byLeague = {}, mine = [], open = new Set(), tok = 0;
+let state = {day: 0, league: "all", live: false, mine: false};
+
+const ymd = off => { const d = new Date(); d.setDate(d.getDate() + off); return d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0"); };
+async function fetchLeague(slug, name) {
+  const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/soccer/${slug}/scoreboard?dates=${ymd(state.day)}`);
+  if (!r.ok) throw new Error(r.status);
+  const j = await r.json();
+  return {name: (j.leagues && j.leagues[0] && j.leagues[0].name) || name, events: j.events || []};
+}
+async function loadAll() {
+  const my = ++tok;
+  $("main").innerHTML = '<div class="empty">Loading matches…</div>';
+  const res = await Promise.allSettled(LEAGUES.map(([s, n]) => fetchLeague(s, n).then(d => [s, d])));
+  if (my !== tok) return;
+  byLeague = {};
+  res.forEach(x => { if (x.status === "fulfilled" && x.value[1].events.length) byLeague[x.value[0]] = x.value[1]; });
+  if (res.every(x => x.status === "rejected")) { $("main").innerHTML = '<div class="empty">Couldn\'t load scores. Check your connection and try again.</div>'; return; }
+  stamp(); render();
+}
+async function refresh() {
+  if (document.hidden) return;
+  const my = tok, slugs = Object.keys(byLeague);
+  const res = await Promise.allSettled(slugs.map(s => fetchLeague(s, byLeague[s].name).then(d => [s, d])));
+  if (my !== tok) return;
+  res.forEach(x => { if (x.status === "fulfilled") byLeague[x.value[0]] = x.value[1]; });
+  stamp(); render();
+}
+function stamp() { $("upd").textContent = "Updated " + new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
+
+function norm(e) {
+  const c = (e.competitions || [])[0] || {}, cs = c.competitors || [];
+  const side = h => { const x = cs.find(y => y.homeAway === h) || {}, t = x.team || {}; return {id: String(t.id || ""), name: t.shortDisplayName || t.displayName || "TBD", logo: t.logo || "", score: x.score}; };
+  const ty = (e.status && e.status.type) || {};
+  return {id: e.id, state: ty.state, detail: ty.shortDetail || ty.description || "", date: e.date, home: side("home"), away: side("away"), venue: c.venue && c.venue.fullName, details: c.details || []};
+}
+function statusText(m) {
+  if (m.state === "in") return m.detail;
+  if (m.state === "post") return m.detail || "FT";
+  if (/postp|cancel|delay|suspend/i.test(m.detail)) return m.detail;
+  return new Date(m.date).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+}
+function detailHtml(m) {
+  const name = id => (m.home.id === String(id) ? m.home.name : m.away.id === String(id) ? m.away.name : "");
+  const ev = m.details.map(d => {
+    const who = (d.athletesInvolved && d.athletesInvolved[0] && d.athletesInvolved[0].displayName) || "";
+    const t = (d.clock && d.clock.displayValue) || "";
+    const tm = d.team ? name(d.team.id) : "";
+    if (d.scoringPlay) return `⚽ ${esc(t)} ${esc(who)}${d.penaltyKick ? " (pen)" : ""}${d.ownGoal ? " (og)" : ""} <small>${esc(tm)}</small>`;
+    if (d.redCard) return `🟥 ${esc(t)} ${esc(who)} <small>${esc(tm)}</small>`;
+    return "";
+  }).filter(Boolean);
+  return (ev.length ? ev.join("<br>") : "<small>No match events yet.</small>") + (m.venue ? `<br><small>📍 ${esc(m.venue)}</small>` : "");
+}
+const teamRow = (t, show) => `<div class="t">${t.logo ? `<img src="${esc(t.logo)}" alt="" loading="lazy">` : ""}<span class="n">${esc(t.name)}</span><button class="star${mine.includes(t.id) ? " on" : ""}" data-team="${esc(t.id)}" aria-label="Follow ${esc(t.name)}">${mine.includes(t.id) ? "★" : "☆"}</button><span class="sc">${show && t.score != null ? esc(t.score) : ""}</span></div>`;
+
+function render() {
+  const days = [-2, -1, 0, 1, 2, 3].map(o => { const d = new Date(); d.setDate(d.getDate() + o); return `<button class="day${o === state.day ? " on" : ""}" data-d="${o}">${o === 0 ? "Today" : o === -1 ? "Yesterday" : o === 1 ? "Tomorrow" : d.toLocaleDateString([], {weekday: "short", day: "numeric"})}</button>`; });
+  $("strip").innerHTML = days.join("");
+  let html = "", shown = 0, chips = `<button class="chip live${state.live ? " on" : ""}" data-f="live">🔴 Live</button><button class="chip${state.mine ? " on" : ""}" data-f="mine">★ My teams</button><button class="chip${state.league === "all" ? " on" : ""}" data-l="all">All</button>`;
+  for (const [slug, n] of LEAGUES) {
+    const d = byLeague[slug]; if (!d) continue;
+    chips += `<button class="chip${state.league === slug ? " on" : ""}" data-l="${slug}">${esc(n)}</button>`;
+    if (state.league !== "all" && state.league !== slug) continue;
+    const order = {in: 0, pre: 1, post: 2};
+    const ms = d.events.map(norm).filter(m => (!state.live || m.state === "in") && (!state.mine || mine.includes(m.home.id) || mine.includes(m.away.id)))
+      .sort((a, b) => (order[a.state] - order[b.state]) || (new Date(a.date) - new Date(b.date)));
+    if (!ms.length) continue;
+    shown += ms.length;
+    html += `<div class="lg">${esc(d.name)}</div>` + ms.map(m => `<div class="m" data-id="${esc(m.id)}"><div class="top"><div class="st ${m.state === "in" ? "in" : ""}">${esc(statusText(m))}</div><div class="teams">${teamRow(m.home, m.state !== "pre")}${teamRow(m.away, m.state !== "pre")}</div></div>${open.has(m.id) ? `<div class="det">${detailHtml(m)}</div>` : ""}</div>`).join("");
+  }
+  $("chips").innerHTML = chips;
+  $("main").innerHTML = html || `<div class="empty">${state.mine ? "No matches for your teams on this day. Tap ☆ next to a team to follow it." : state.live ? "No live matches right now." : "No matches on this day."}</div>`;
+}
+
+$("strip").addEventListener("click", e => { const b = e.target.closest(".day"); if (!b) return; state.day = +b.dataset.d; open.clear(); loadAll(); });
+$("chips").addEventListener("click", e => {
+  const b = e.target.closest(".chip"); if (!b) return;
+  if (b.dataset.f === "live") state.live = !state.live;
+  else if (b.dataset.f === "mine") state.mine = !state.mine;
+  else state.league = b.dataset.l;
+  render();
+});
+$("main").addEventListener("click", e => {
+  const s = e.target.closest("[data-team]");
+  if (s) {
+    const id = s.dataset.team;
+    mine = mine.includes(id) ? mine.filter(x => x !== id) : [id, ...mine].slice(0, 100);
+    store.set("matchday-teams", JSON.stringify(mine)); return render();
+  }
+  const m = e.target.closest(".m"); if (!m) return;
+  open.has(m.dataset.id) ? open.delete(m.dataset.id) : open.add(m.dataset.id); render();
+});
+
+(async () => {
+  try { mine = JSON.parse((await store.get("matchday-teams")) || "[]"); } catch (e) {}
+  loadAll();
+  setInterval(() => { if (state.day === 0) refresh(); }, 45000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && state.day === 0) refresh(); });
+})();
+</script>
+</body>
+</html>
